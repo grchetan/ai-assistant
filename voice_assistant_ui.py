@@ -1,12 +1,15 @@
 # =============================================================
 #  A R I A  —  Premium AI Voice Assistant
-#  Cinematic Dark UI · Glowing Circle · Smooth Animations
+#  Cinematic Dark UI · Glowing Circle · Neural Voice
 # =============================================================
 
 import threading
 import queue
+import asyncio
+import tempfile
 import speech_recognition as sr
-import pyttsx3
+import edge_tts
+import pygame
 import datetime
 import webbrowser
 import os
@@ -17,14 +20,47 @@ import random
 import tkinter as tk
 
 # ─────────────────────────────────────────────────────────────
-#  VOICE ENGINE
+#  NEURAL VOICE ENGINE  (Microsoft Edge TTS)
 # ─────────────────────────────────────────────────────────────
-engine = pyttsx3.init()
-voices = engine.getProperty("voices")
-if len(voices) > 1:
-    engine.setProperty("voice", voices[1].id)   # female voice
-engine.setProperty("rate", 162)
-engine.setProperty("volume", 1.0)
+# Voices to choose from (all sound very human/natural):
+#   en-IN-NeerjaNeural   → Indian English female (warm & clear)
+#   en-IN-PrabhatNeural  → Indian English male
+#   en-US-AriaNeural     → US English female (professional)
+#   en-US-JennyNeural    → US English female (friendly)
+VOICE      = "en-IN-NeerjaNeural"
+VOICE_RATE = "+8%"      # slightly faster than default
+VOICE_VOL  = "+10%"
+
+# Init pygame mixer once
+pygame.mixer.pre_init(frequency=48000, size=-16, channels=1, buffer=512)
+pygame.mixer.init()
+
+_tmp_audio = None   # holds last temp file path
+
+async def _edge_tts_generate(text: str) -> str:
+    """Generate speech MP3 via Edge-TTS neural voice. Returns temp filepath."""
+    communicate = edge_tts.Communicate(text, VOICE, rate=VOICE_RATE, volume=VOICE_VOL)
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp.close()
+    await communicate.save(tmp.name)
+    return tmp.name
+
+def _play_and_delete(fpath: str):
+    """Play an MP3 file via pygame and then delete it."""
+    global _tmp_audio
+    try:
+        pygame.mixer.music.load(fpath)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            time.sleep(0.04)
+        pygame.mixer.music.unload()
+    except Exception as e:
+        add_log(f"❌  Playback error: {e}", "#ff4466")
+    finally:
+        try:
+            os.unlink(fpath)
+        except Exception:
+            pass
 
 # ─────────────────────────────────────────────────────────────
 #  GLOBAL STATE  (thread-safe via queue)
@@ -62,8 +98,13 @@ def add_log(msg, color="#aaaacc"):
 def speak(text):
     set_state("speaking")
     add_log(f"🔊  {text}", "#00ffaa")
-    engine.say(text)
-    engine.runAndWait()
+    try:
+        # Generate neural audio then play — completely smooth
+        fpath = asyncio.run(_edge_tts_generate(text))
+        _play_and_delete(fpath)
+    except Exception as e:
+        add_log(f"❌  TTS error: {e}", "#ff4466")
+        # Fallback: silent (don't crash)
     set_state("idle")
 
 def listen():
