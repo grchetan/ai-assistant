@@ -72,13 +72,14 @@ STATES = {
     "speaking":  {"glow": "#00ffaa", "label": "Speaking…",            "pulse": True },
 }
 
-_state       = "idle"
-_running     = False
-_log_lines   = []          # list of (text, color)
-_ui_queue    = queue.Queue()   # commands from threads → UI
+_state            = "idle"
+_running          = False
+_log_lines        = []          # list of (text, color)
+_ui_queue         = queue.Queue()
+_fail_count       = 0           # consecutive recognition failures
+_recognizer       = sr.Recognizer()   # shared, pre-calibrated
 
 def _post(cmd, *args):
-    """Thread-safe message to UI."""
     _ui_queue.put((cmd, args))
 
 def set_state(s):
@@ -107,15 +108,29 @@ def speak(text):
         # Fallback: silent (don't crash)
     set_state("idle")
 
+def _calibrate_mic():
+    """One-time mic calibration at startup for clean noise floor."""
+    try:
+        with sr.Microphone() as source:
+            _recognizer.adjust_for_ambient_noise(source, duration=1.2)
+        _recognizer.pause_threshold          = 0.9
+        _recognizer.non_speaking_duration    = 0.6
+        _recognizer.dynamic_energy_threshold = True
+        _recognizer.dynamic_energy_ratio     = 1.8
+    except Exception:
+        pass
+
 def listen():
-    r = sr.Recognizer()
-    r.dynamic_energy_threshold = True
+    """Listen once. Returns text or empty string. NEVER speaks on silence."""
+    global _fail_count
     set_state("listening")
     try:
         with sr.Microphone() as source:
-            r.adjust_for_ambient_noise(source, duration=0.4)
-            audio = r.listen(source, timeout=7, phrase_time_limit=9)
+            # Quick noise adjust each time (cheap)
+            _recognizer.adjust_for_ambient_noise(source, duration=0.3)
+            audio = _recognizer.listen(source, timeout=8, phrase_time_limit=10)
     except sr.WaitTimeoutError:
+        # Nobody spoke — silent retry, no error message
         set_state("idle")
         return ""
     except Exception:
@@ -124,96 +139,329 @@ def listen():
 
     set_state("thinking")
     try:
-        command = r.recognize_google(audio, language="en-in")
-        add_log(f"🎙  You: {command}", "#00e5ff")
+        command = _recognizer.recognize_google(audio, language="en-in")
+        _fail_count = 0
+        add_log(f"🎙  You said: {command}", "#00e5ff")
         return command.lower()
     except sr.UnknownValueError:
-        add_log("❌  Samajh nahi aaya", "#ff4466")
-        speak("Clear nahi aaya, dobara bolo.")
+        # Got audio but couldn't understand — only speak after 3 fails in a row
+        _fail_count += 1
+        if _fail_count >= 3:
+            add_log("〰  Thoda aur clearly bolo", "#ff8844")
+            speak("Thoda clearly bolo please.")
+            _fail_count = 0
+        else:
+            add_log("〰  (unclear audio, retrying)", "#555577")
+        set_state("idle")
         return ""
-    except Exception as e:
-        add_log(f"❌  Error: {e}", "#ff4466")
+    except sr.RequestError:
+        add_log("❌  Internet connection error", "#ff4466")
+        _fail_count = 0
+        set_state("idle")
         return ""
 
 # ─────────────────────────────────────────────────────────────
-#  COMMANDS
+#  SMART COMMANDS  —  30+ supported
 # ─────────────────────────────────────────────────────────────
+import re, requests, random as _rnd
+
+JOKES = [
+    "Main ek AI hoon. Mujhe ek baar kisi ne kaha — kya tum sochte ho? Maine kaha — haan, lekin sirf logically!",
+    "Ek programmer roya kyunki uski wife ne kaha — jao bahar kuch karo. Toh woh bahar gaya aur ek bug fix kiya.",
+    "Meri memory itni achhi hai ki main apni galtiyan bhi yaad rakhta hoon. Aur aapki bhi!",
+    "Ek AI doctor ke paas gaya. Doctor ne kaha — tumhe aaram chahiye. AI ne kaha — error: sleep() not found.",
+    "Why do programmers prefer dark mode? Because light attracts bugs!",
+]
+
+QUOTES = [
+    "Sapne woh nahi jo hum soते waqt dekhte hain. Sapne woh hain jo hume sone nahi dete. — A.P.J. Abdul Kalam",
+    "Koshish karne walon ki kabhi haar nahi hoti.",
+    "Har mushkil mein ek mauka chhupa hota hai.",
+    "Safalta tab milti hai jab aap khud par bharosa karte hain.",
+    "Kal ki chinta chhodkar aaj ka kaam karo.",
+]
+
 def _close_browsers():
     speak("Saare browsers band kar raha hoon.")
     for exe in ["chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe"]:
         os.system(f"taskkill /f /im {exe} >nul 2>&1")
-    speak("Saare browsers band ho gaye.")
+    speak("Ho gaya. Saare browsers band.")
 
 def _tell_time():
-    now = datetime.datetime.now().strftime("%I:%M %p")
-    speak(f"Ab time hai {now}")
+    now = datetime.datetime.now()
+    speak(f"Abhi time hai {now.strftime('%I:%M %p')}")
 
 def _tell_date():
-    today = datetime.datetime.now().strftime("%d %B %Y")
-    speak(f"Aaj ki date hai {today}")
+    now = datetime.datetime.now()
+    days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+    day  = days[now.weekday()]
+    speak(f"Aaj {day} hai, {now.strftime('%d %B %Y')}")
 
 def _screenshot():
     try:
         import pyautogui
-        pyautogui.screenshot().save("screenshot.png")
-        speak("Screenshot save ho gaya.")
+        fname = f"screenshot_{datetime.datetime.now().strftime('%H%M%S')}.png"
+        pyautogui.screenshot().save(fname)
+        speak(f"Screenshot {fname} mein save ho gaya.")
     except Exception:
         speak("Screenshot nahi le saka.")
 
-def _search(query):
-    webbrowser.open(f"https://www.google.com/search?q={query}")
+def _system_info():
+    try:
+        import psutil
+        cpu  = psutil.cpu_percent(interval=1)
+        ram  = psutil.virtual_memory()
+        used = ram.percent
+        speak(f"CPU usage {cpu} percent hai. RAM {used} percent use ho rahi hai.")
+    except ImportError:
+        speak("psutil install nahi hai. System info nahi de sakta.")
 
-def process_command(command):
-    if not command:
+def _battery_status():
+    try:
+        import psutil
+        bat = psutil.sensors_battery()
+        if bat:
+            pct = int(bat.percent)
+            charging = "charge ho rahi hai" if bat.power_plugged else "charging nahi hai"
+            speak(f"Battery {pct} percent hai aur {charging}.")
+        else:
+            speak("Battery info nahi mili. Shayad desktop PC hai.")
+    except ImportError:
+        speak("psutil install nahi hai.")
+
+def _wiki_search(query):
+    """Quick Wikipedia summary."""
+    set_state("thinking")
+    add_log(f"🧠  Wikipedia search: {query}", "#cc44ff")
+    try:
+        # Use Wikipedia REST API — no library needed
+        url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{query.replace(' ', '_')}"
+        r   = requests.get(url, timeout=6)
+        if r.status_code == 200:
+            data    = r.json()
+            extract = data.get("extract", "")
+            if extract:
+                # Speak only first 2 sentences to keep it concise
+                sentences = re.split(r'(?<=[.!?])\s+', extract)
+                answer    = " ".join(sentences[:2])
+                speak(answer)
+                return
+        speak("Wikipedia par koi achhi information nahi mili.")
+    except Exception:
+        speak("Internet se information nahi le saka.")
+
+def _evaluate_math(expr):
+    """Safely evaluate a math expression."""
+    try:
+        # Keep only safe math chars
+        clean = re.sub(r'[^0-9+\-*/().%^ ]', '', expr)
+        clean = clean.replace('^', '**')
+        if not clean.strip():
+            return None
+        result = eval(clean, {"__builtins__": {}})
+        return result
+    except Exception:
         return None
 
-    c = command.strip()
+def _volume_control(action):
+    if action == "up":
+        for _ in range(5):
+            subprocess.run(["powershell",
+                "(New-Object -ComObject WScript.Shell).SendKeys([char]175)"],
+                capture_output=True)
+        speak("Volume badha diya.")
+    elif action == "down":
+        for _ in range(5):
+            subprocess.run(["powershell",
+                "(New-Object -ComObject WScript.Shell).SendKeys([char]174)"],
+                capture_output=True)
+        speak("Volume ghata diya.")
+    elif action == "mute":
+        subprocess.run(["powershell",
+            "(New-Object -ComObject WScript.Shell).SendKeys([char]173)"],
+            capture_output=True)
+        speak("Mute kar diya.")
 
-    if   "time"       in c: _tell_time()
-    elif "date"       in c: _tell_date()
-    elif "hello" in c or "hi" in c:
-        speak("Hello Chetan! Kya kar sakta hoon aapke liye?")
-    elif "who are you" in c or "kaun ho" in c:
-        speak("Main ARIA hoon — Aapka personal AI Voice Assistant.")
+def _open_website(url):
+    if not url.startswith("http"):
+        url = "https://" + url
+    webbrowser.open(url)
 
-    elif "notepad"          in c: speak("Notepad open."); os.system("notepad")
-    elif "word"             in c: speak("Word open."); os.system("start winword")
-    elif "excel"            in c: speak("Excel open."); os.system("start excel")
-    elif "powerpoint" in c or "ppt" in c: speak("PowerPoint open."); os.system("start powerpnt")
-    elif "calculator"       in c: speak("Calculator open."); os.system("calc")
-    elif "file explorer"    in c or "explorer" in c: speak("File Explorer open."); os.system("explorer")
+def _greet_by_time():
+    h = datetime.datetime.now().hour
+    if 5 <= h < 12:
+        speak("Good morning Chetan! Aaj ka din achha jayega.")
+    elif 12 <= h < 17:
+        speak("Good afternoon Chetan! Kaam kaisa chal raha hai?")
+    elif 17 <= h < 21:
+        speak("Good evening Chetan! Thoda aaram karo.")
+    else:
+        speak("Raat ke time bhi kaam? Neend bhi zaroori hai Chetan!")
 
-    elif "youtube"          in c: speak("YouTube open kar raha hoon."); webbrowser.open("https://youtube.com")
-    elif "google"           in c and "search" not in c: speak("Google open."); webbrowser.open("https://google.com")
-    elif "github"           in c: speak("GitHub open."); webbrowser.open("https://github.com")
-    elif "stackoverflow"    in c: speak("Stack Overflow open."); webbrowser.open("https://stackoverflow.com")
-    elif "chrome"           in c: speak("Chrome open."); os.system("start chrome")
+def process_command(command: str):
+    if not command:
+        return None
+    c = command.strip().lower()
+    add_log(f"⚙  Processing: {c}", "#444466")
 
+    # ── GREETINGS ──────────────────────────────────────────
+    if any(w in c for w in ["hello", "hi aria", "hey aria", "namaste", "helo"]):
+        _greet_by_time()
+
+    elif any(w in c for w in ["how are you", "kaisa hai", "kaise ho", "how r u"]):
+        speak("Main bilkul theek hoon Chetan! Aap batao, kya help chahiye?")
+
+    elif "who are you" in c or "kaun ho" in c or "your name" in c or "naam kya" in c:
+        speak("Main ARIA hoon — Aapka personal AI voice assistant. Jo bolo woh karta hoon.")
+
+    elif "thank" in c or "shukriya" in c or "dhanyawad" in c:
+        speak("Koi baat nahi Chetan. Ye mera kaam hai!")
+
+    # ── TIME / DATE ─────────────────────────────────────────
+    elif "time"  in c and "date" not in c: _tell_time()
+    elif "date"  in c or "day"  in c:      _tell_date()
+
+    # ── MATH ────────────────────────────────────────────────
+    elif any(w in c for w in ["calculate", "what is", "kitna hai", "solve"]) and \
+         any(ch in c for ch in list("+-*/")):
+        # Extract math expression
+        expr = re.sub(r'(calculate|what is|solve|kitna hai)', '', c).strip()
+        result = _evaluate_math(expr)
+        if result is not None:
+            speak(f"{expr} ka answer hai {result}")
+        else:
+            speak("Ye math samajh nahi aaya.")
+
+    # ── KNOWLEDGE ───────────────────────────────────────────
+    elif c.startswith("what is ") or c.startswith("who is ") or \
+         c.startswith("tell me about ") or c.startswith("batao ") or \
+         "explain" in c or "wikipedia" in c:
+        # Extract topic
+        for prefix in ["what is ","who is ","tell me about ","batao ","explain ","wikipedia "]:
+            if c.startswith(prefix):
+                topic = c[len(prefix):].strip()
+                break
+        else:
+            topic = c
+        if topic:
+            speak(f"{topic} ke baare mein dhundh raha hoon.")
+            _wiki_search(topic)
+        else:
+            speak("Kya jaanna chahte ho?"
+)
+
+    # ── OPEN APPS ───────────────────────────────────────────
+    elif "notepad"                        in c: speak("Notepad open kar raha hoon."); os.system("notepad")
+    elif "word"                           in c: speak("Microsoft Word open kar raha hoon."); os.system("start winword")
+    elif "excel"                          in c: speak("Excel open kar raha hoon."); os.system("start excel")
+    elif "powerpoint" in c or "ppt"       in c: speak("PowerPoint open kar raha hoon."); os.system("start powerpnt")
+    elif "calculator" in c or "calc"      in c: speak("Calculator open kar raha hoon."); os.system("calc")
+    elif "paint"                          in c: speak("Paint open kar raha hoon."); os.system("mspaint")
+    elif "task manager"                   in c: speak("Task Manager open kar raha hoon."); os.system("taskmgr")
+    elif "settings"                       in c: speak("Settings open kar raha hoon."); os.system("start ms-settings:")
+    elif "file explorer" in c or ("explorer" in c and "internet" not in c):
+        speak("File Explorer open kar raha hoon."); os.system("explorer")
+    elif "control panel"                  in c: speak("Control Panel open."); os.system("control")
+    elif "snipping tool" in c or "snip"   in c: speak("Snipping tool open."); os.system("snippingtool")
+
+    # ── WEB / BROWSER ───────────────────────────────────────
+    elif "youtube"     in c: speak("YouTube khol raha hoon."); webbrowser.open("https://youtube.com")
+    elif "google"      in c and "search" not in c: speak("Google khol raha hoon."); webbrowser.open("https://google.com")
+    elif "github"      in c: speak("GitHub open kar raha hoon."); webbrowser.open("https://github.com")
+    elif "stackoverflow" in c: speak("Stack Overflow open."); webbrowser.open("https://stackoverflow.com")
+    elif "instagram"   in c: speak("Instagram open kar raha hoon."); webbrowser.open("https://instagram.com")
+    elif "twitter"  in c or "x.com" in c: speak("Twitter open kar raha hoon."); webbrowser.open("https://x.com")
+    elif "whatsapp"    in c: speak("WhatsApp Web open kar raha hoon."); webbrowser.open("https://web.whatsapp.com")
+    elif "chatgpt"     in c: speak("ChatGPT open kar raha hoon."); webbrowser.open("https://chat.openai.com")
+    elif "netflix"     in c: speak("Netflix open kar raha hoon."); webbrowser.open("https://netflix.com")
+    elif "chrome"      in c: speak("Chrome open."); os.system("start chrome")
+    elif "open website" in c or "open site" in c:
+        speak("Kaun si website kholni hai?")
+        site = listen()
+        if site:
+            speak(f"{site} khol raha hoon.")
+            _open_website(site.strip())
+
+    # ── DEVELOPER ───────────────────────────────────────────
     elif "vscode" in c or "vs code" in c or "code editor" in c:
         speak("VS Code open."); os.system("code")
     elif "cmd" in c or "command prompt" in c:
-        speak("Command Prompt open."); os.system("start cmd")
+        speak("Command Prompt open kar raha hoon."); os.system("start cmd")
+    elif "powershell" in c:
+        speak("PowerShell open."); os.system("start powershell")
+    elif "git" in c and "github" not in c:
+        speak("Git bash open kar raha hoon."); os.system("start git-bash")
 
-    elif "search"           in c:
+    # ── SEARCH ──────────────────────────────────────────────
+    elif "search" in c or "google karo" in c or "dhundho" in c:
         speak("Kya search karna hai?")
         q = listen()
         if q:
-            _search(q)
-            speak(f"Searching: {q}")
+            webbrowser.open(f"https://www.google.com/search?q={q}")
+            speak(f"{q} Google par search kar diya.")
 
-    elif "screenshot"       in c: _screenshot()
-    elif "wifi"             in c: subprocess.run("start cmd /k netsh wlan show profile key=clear", shell=True)
+    elif "youtube search" in c or "youtube mein" in c or "play" in c:
+        speak("YouTube par kya search karna hai?")
+        q = listen()
+        if q:
+            webbrowser.open(f"https://www.youtube.com/results?search_query={q}")
+            speak(f"YouTube par {q} search kar diya.")
+
+    # ── SYSTEM ──────────────────────────────────────────────
+    elif "screenshot"    in c: _screenshot()
+    elif "wifi"          in c or "password" in c:
+        subprocess.run("start cmd /k netsh wlan show profile key=clear", shell=True)
+        speak("WiFi passwords terminal mein dikh rahe hain.")
     elif "close" in c and ("browser" in c or "tab" in c): _close_browsers()
+    elif "lock"          in c: speak("PC lock kar raha hoon."); os.system("rundll32.exe user32.dll,LockWorkStation")
+    elif "sleep"         in c and "pc" in c: speak("PC sleep mode mein ja raha hai."); os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
+    elif "empty recycle" in c or "recycle bin" in c:
+        os.system("powershell -command \"Clear-RecycleBin -Force\"")
+        speak("Recycle bin khali kar diya.")
+    elif "ip address"    in c or "mera ip" in c:
+        try:
+            ip = requests.get("https://api.ipify.org", timeout=4).text
+            speak(f"Aapka public IP address hai {ip}")
+        except Exception:
+            speak("IP address nahi le saka.")
 
-    elif "shutdown"         in c: speak("System shutdown ho raha hai."); os.system("shutdown /s /t 10")
-    elif "restart"          in c: speak("System restart ho raha hai.");  os.system("shutdown /r /t 10")
+    # ── VOLUME ──────────────────────────────────────────────
+    elif "volume up"     in c or "awaaz badha" in c: _volume_control("up")
+    elif "volume down"   in c or "awaaz ghata" in c: _volume_control("down")
+    elif "mute"          in c or "chup"        in c: _volume_control("mute")
 
-    elif "exit" in c or "quit" in c or "band" in c or "stop" in c:
-        speak("Goodbye Chetan! Phir milenge.")
+    # ── SHUTDOWN / RESTART ──────────────────────────────────
+    elif "shutdown"      in c: speak("10 seconds mein system band hoga."); os.system("shutdown /s /t 10")
+    elif "restart"       in c: speak("System restart ho raha hai."); os.system("shutdown /r /t 10")
+    elif "cancel shutdown" in c: os.system("shutdown /a"); speak("Shutdown cancel kar diya.")
+
+    # ── SYSTEM INFO ─────────────────────────────────────────
+    elif "system info"  in c or "cpu"    in c or "ram"     in c: _system_info()
+    elif "battery"      in c or "charge" in c:                   _battery_status()
+
+    # ── FUN ─────────────────────────────────────────────────
+    elif "joke"         in c or "joke sunao" in c: speak(_rnd.choice(JOKES))
+    elif "quote"        in c or "motivat"    in c: speak(_rnd.choice(QUOTES))
+    elif "flip coin"    in c or "coin"       in c:
+        result = _rnd.choice(["Heads", "Tails"])
+        speak(f"Coin toss result hai — {result}!")
+    elif "dice" in c or "random number" in c:
+        n = _rnd.randint(1, 6)
+        speak(f"Dice roll — {n}!")
+
+    # ── EXIT ────────────────────────────────────────────────
+    elif any(w in c for w in ["exit", "quit", "band karo", "goodbye", "bye", "alvida"]):
+        speak("Goodbye Chetan! Jab bhi zaroorat ho, main hamesha yahan hoon.")
         return "EXIT"
 
+    # ── UNKNOWN — try Wikipedia as last resort ──────────────
     else:
-        speak("Ye command samajh nahi aayi. Kuch aur try karo.")
+        # Check if it looks like a question
+        if any(c.startswith(w) for w in ["kya","kaun","kab","kahan","kyun","kaise","who","what","when","where","why","how"]):
+            speak(f"{c} ke baare mein search kar raha hoon.")
+            _wiki_search(c)
+        else:
+            speak(f"Ye command clear nahi tha. Kuch aur try karo.")
 
     return None
 
@@ -222,16 +470,21 @@ def process_command(command):
 # ─────────────────────────────────────────────────────────────
 def _assistant_loop():
     global _running
-    speak("Hello Chetan! Main ARIA hoon, aapka AI voice assistant. Hukum karo.")
+    # Calibrate mic once at startup
+    add_log("⚙  Microphone calibrate ho raha hai…", "#555577")
+    _calibrate_mic()
+    add_log("✅  Mic calibration done!", "#00ffaa")
+    speak("Hello Chetan! Main ARIA hoon. Microphone ready hai. Hukum karo.")
     while _running:
         cmd = listen()
         if not _running:
             break
-        result = process_command(cmd)
-        if result == "EXIT":
-            _running = False
-            _post("stopped")
-            break
+        if cmd:   # only process if we actually heard something
+            result = process_command(cmd)
+            if result == "EXIT":
+                _running = False
+                _post("stopped")
+                break
 
 # ─────────────────────────────────────────────────────────────
 #  PREMIUM  UI
