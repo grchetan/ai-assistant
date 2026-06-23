@@ -27,8 +27,8 @@ import tkinter as tk
 #   en-IN-PrabhatNeural  → Indian English male
 #   en-US-AriaNeural     → US English female (professional)
 #   en-US-JennyNeural    → US English female (friendly)
-VOICE      = "en-IN-PrabhatNeural"   # Indian male — confident & clear like JARVIS
-VOICE_RATE = "+12%"     # slightly faster = more authoritative
+VOICE      = "en-IN-PrabhatNeural"
+VOICE_RATE = "+22%"     # faster = snappier responses
 VOICE_VOL  = "+15%"
 
 # Init pygame mixer once
@@ -94,43 +94,109 @@ def add_log(msg, color="#aaaacc"):
     _post("log")
 
 # ─────────────────────────────────────────────────────────────
+#  AUDIO CACHE  —  pre-generate common phrases at startup
+#  so zero network delay on frequent responses
+# ─────────────────────────────────────────────────────────────
+_audio_cache: dict = {}   # text → raw MP3 bytes
+
+# Phrases to pre-cache at startup
+_CACHE_PHRASES = [
+    "Done, sir!",
+    "Ho gaya, sir!",
+    "My pleasure, sir!",
+    "Ye toh mera kaam hai, sir!",
+    "Always at your service, sir!",
+    "Sir, thoda aur clearly bolo? Samajh nahi aaya.",
+    "Bilkul top condition mein, sir! All systems operational. Aap batao?",
+    "Thoda clearly bolo please.",
+    "JARVIS online. Kya hukum hai, sir? Code likhna hai, koi site kholni hai, ya bas baat karni hai — main hazir hoon!",
+    "Good morning, sir! Systems online. Aaj kya conquer karna hai?",
+    "Good afternoon, sir! Kaam chal raha hai? Koi help chahiye?",
+    "Good evening, sir! Din kaisa raha? Kuch aur kaam baaki hai?",
+    "Sir, itni raat ko bhi kaam? Main saath hoon, par neend bhi zaroori hai!",
+    "Sir, kya search karna hai?",
+    "Sir, kaun si website kholni hai?",
+    "Locking workstation, sir.",
+    "Restarting, sir.",
+    "Recycle bin cleared, sir!",
+    "Sir, 10 seconds mein system shutdown.",
+    "Chrome launch kar raha hoon, sir.",
+]
+
+async def _precache_all():
+    """Pre-generate MP3 bytes for common phrases into RAM."""
+    for phrase in _CACHE_PHRASES:
+        try:
+            com = edge_tts.Communicate(phrase, VOICE, rate=VOICE_RATE, volume=VOICE_VOL)
+            tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+            tmp.close()
+            await com.save(tmp.name)
+            with open(tmp.name, "rb") as f:
+                _audio_cache[phrase] = f.read()
+            os.unlink(tmp.name)
+        except Exception:
+            pass   # if one fails, skip it
+
+def _precache_blocking():
+    """Run pre-cache in a new event loop (called from thread)."""
+    try:
+        asyncio.run(_precache_all())
+        add_log(f"\u26a1  {len(_audio_cache)} responses cached — instant replies ready!", "#00ffcc")
+    except Exception:
+        pass
+
+def _play_from_cache(text: str) -> bool:
+    """Try to play from cache. Returns True if hit."""
+    data = _audio_cache.get(text)
+    if data is None:
+        return False
+    try:
+        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        tmp.write(data)
+        tmp.close()
+        _play_and_delete(tmp.name)
+        return True
+    except Exception:
+        return False
+
+# ─────────────────────────────────────────────────────────────
 #  SPEAK / LISTEN
 # ─────────────────────────────────────────────────────────────
 def speak(text):
     set_state("speaking")
-    add_log(f"🔊  {text}", "#00ffaa")
+    add_log(f"🔊  {text}", "#00ffcc")
     try:
-        # Generate neural audio then play — completely smooth
-        fpath = asyncio.run(_edge_tts_generate(text))
-        _play_and_delete(fpath)
+        if not _play_from_cache(text):          # cache hit → instant
+            fpath = asyncio.run(_edge_tts_generate(text))  # cache miss → network
+            _play_and_delete(fpath)
     except Exception as e:
         add_log(f"❌  TTS error: {e}", "#ff4466")
-        # Fallback: silent (don't crash)
     set_state("idle")
 
+# keep mic source open between listens to avoid re-init overhead
+_mic_source = None
+
 def _calibrate_mic():
-    """One-time mic calibration at startup for clean noise floor."""
+    """One-time mic calibration. Sets energy threshold for the session."""
     try:
         with sr.Microphone() as source:
-            _recognizer.adjust_for_ambient_noise(source, duration=1.2)
-        _recognizer.pause_threshold          = 0.9
-        _recognizer.non_speaking_duration    = 0.6
+            _recognizer.adjust_for_ambient_noise(source, duration=1.5)
+        _recognizer.pause_threshold          = 0.7   # faster end-of-speech detection
+        _recognizer.non_speaking_duration    = 0.5
         _recognizer.dynamic_energy_threshold = True
-        _recognizer.dynamic_energy_ratio     = 1.8
+        _recognizer.dynamic_energy_ratio     = 1.6
     except Exception:
         pass
 
 def listen():
-    """Listen once. Returns text or empty string. NEVER speaks on silence."""
+    """Fast listen — NO per-call noise adjustment (calibrated once at startup)."""
     global _fail_count
     set_state("listening")
     try:
         with sr.Microphone() as source:
-            # Quick noise adjust each time (cheap)
-            _recognizer.adjust_for_ambient_noise(source, duration=0.3)
-            audio = _recognizer.listen(source, timeout=8, phrase_time_limit=10)
+            # ⚡ NO adjust_for_ambient_noise here — saves 300ms every call!
+            audio = _recognizer.listen(source, timeout=7, phrase_time_limit=9)
     except sr.WaitTimeoutError:
-        # Nobody spoke — silent retry, no error message
         set_state("idle")
         return ""
     except Exception:
@@ -144,18 +210,17 @@ def listen():
         add_log(f"🎙  You said: {command}", "#00e5ff")
         return command.lower()
     except sr.UnknownValueError:
-        # Got audio but couldn't understand — only speak after 3 fails in a row
         _fail_count += 1
         if _fail_count >= 3:
-            add_log("〰  Thoda aur clearly bolo", "#ff8844")
+            add_log("〰  Thoda clearly bolo", "#ff8844")
             speak("Thoda clearly bolo please.")
             _fail_count = 0
         else:
-            add_log("〰  (unclear audio, retrying)", "#555577")
+            add_log("〰  (unclear, retrying)", "#555577")
         set_state("idle")
         return ""
     except sr.RequestError:
-        add_log("❌  Internet connection error", "#ff4466")
+        add_log("❌  Internet error", "#ff4466")
         _fail_count = 0
         set_state("idle")
         return ""
@@ -603,7 +668,12 @@ def process_command(command: str):
 def _assistant_loop():
     global _running
     add_log("⚙  JARVIS systems initializing…", "#334466")
-    _calibrate_mic()
+
+    # Run mic calibration + audio pre-caching in parallel
+    cache_thread = threading.Thread(target=_precache_blocking, daemon=True)
+    cache_thread.start()
+    _calibrate_mic()   # runs while cache builds in background
+
     add_log("✅  JARVIS online — all systems ready!", "#00ffcc")
     speak("JARVIS online. Kya hukum hai, sir? Code likhna hai, koi site kholni hai, ya bas baat karni hai — main hazir hoon!")
     while _running:
@@ -616,6 +686,7 @@ def _assistant_loop():
                 _running = False
                 _post("stopped")
                 break
+
 
 # ─────────────────────────────────────────────────────────────
 #  PREMIUM  UI
