@@ -7,6 +7,7 @@ import threading
 import queue
 import asyncio
 import tempfile
+import numpy as np
 import speech_recognition as sr
 import edge_tts
 import pygame
@@ -207,6 +208,12 @@ def listen():
     try:
         command = _recognizer.recognize_google(audio, language="en-in")
         _fail_count = 0
+        # 🔐 Voice Authentication check
+        if not verify_voice(audio):
+            add_log("🔐 ❌ Unauthorized voice — JARVIS ignoring.", "#ff4466")
+            speak("Sorry, ye JARVIS sirf unke liye hai jinka voice registered hai!")
+            set_state("idle")
+            return ""
         add_log(f"🎙  You said: {command}", "#00e5ff")
         return command.lower()
     except sr.UnknownValueError:
@@ -226,9 +233,169 @@ def listen():
         return ""
 
 # ─────────────────────────────────────────────────────────────
+#  🔐  VOICE AUTHENTICATION  —  only owner's voice accepted
+#      Uses MFCC fingerprinting (numpy + scipy only, no ML deps)
+# ─────────────────────────────────────────────────────────────
+VOICE_PROFILE_PATH = "jarvis_voice_profile.npy"
+_voice_auth_enabled = False
+_owner_embedding    = None     # mean MFCC feature vector
+
+def _extract_mfcc_embedding(audio_obj):
+    """
+    Extract a voice fingerprint from a SpeechRecognition Audio object.
+    Returns a 1D numpy array (mean of 40 MFCC coefficients over frames).
+    Pure numpy + scipy — no external ML needed.
+    """
+    try:
+        import struct, wave, io
+        from scipy.fftpack import dct
+
+        # Get raw PCM bytes at 16 kHz mono 16-bit
+        raw = audio_obj.get_wav_data(convert_rate=16000, convert_width=2)
+        # Parse WAV to get PCM samples
+        with wave.open(io.BytesIO(raw)) as wf:
+            frames = wf.readframes(wf.getnframes())
+            n_channels = wf.getnchannels()
+        samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
+        if n_channels > 1:
+            samples = samples[::n_channels]    # take left channel
+        samples /= 32768.0                     # normalise to [-1, 1]
+
+        if len(samples) < 512:
+            return None
+
+        # ── MFCC computation ──────────────────────────────────
+        sr_hz    = 16000
+        n_mfcc   = 40
+        n_fft    = 512
+        hop      = 160    # 10ms hop
+        n_mels   = 40
+        fmin, fmax = 80.0, 7600.0
+
+        # Pre-emphasis
+        samples = np.append(samples[0], samples[1:] - 0.97 * samples[:-1])
+
+        # Framing
+        frames_list = []
+        for i in range(0, len(samples) - n_fft, hop):
+            frame = samples[i:i + n_fft] * np.hamming(n_fft)
+            frames_list.append(frame)
+        if not frames_list:
+            return None
+        frames_arr = np.array(frames_list)
+
+        # Power spectrum
+        power = (np.abs(np.fft.rfft(frames_arr, n=n_fft)) ** 2) / n_fft
+
+        # Mel filterbank
+        def hz_to_mel(hz): return 2595 * np.log10(1 + hz / 700)
+        def mel_to_hz(mel): return 700 * (10 ** (mel / 2595) - 1)
+        mel_low, mel_high = hz_to_mel(fmin), hz_to_mel(fmax)
+        mel_pts  = np.linspace(mel_low, mel_high, n_mels + 2)
+        hz_pts   = mel_to_hz(mel_pts)
+        bin_pts  = np.floor((n_fft + 1) * hz_pts / sr_hz).astype(int)
+        half_fft = n_fft // 2 + 1
+        fbank    = np.zeros((n_mels, half_fft))
+        for m in range(1, n_mels + 1):
+            lo, ctr, hi = bin_pts[m-1], bin_pts[m], bin_pts[m+1]
+            for k in range(lo, ctr):
+                if ctr != lo:
+                    fbank[m-1, k] = (k - lo) / (ctr - lo)
+            for k in range(ctr, hi):
+                if hi != ctr:
+                    fbank[m-1, k] = (hi - k) / (hi - ctr)
+
+        # Log mel energy
+        mel_energy = np.dot(power, fbank.T)
+        mel_energy = np.where(mel_energy == 0, np.finfo(float).eps, mel_energy)
+        log_mel    = np.log(mel_energy)
+
+        # DCT to get MFCCs
+        mfcc = dct(log_mel, type=2, axis=1, norm='ortho')[:, :n_mfcc]
+
+        # Return mean over time (compact fingerprint)
+        return mfcc.mean(axis=0)
+
+    except Exception as e:
+        add_log(f"⚠  MFCC error: {e}", "#ff8844")
+        return None
+
+def _cosine_sim(a, b):
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+def _load_voice_profile():
+    """Load saved owner embedding at startup."""
+    global _owner_embedding, _voice_auth_enabled
+    if os.path.exists(VOICE_PROFILE_PATH):
+        try:
+            _owner_embedding    = np.load(VOICE_PROFILE_PATH)
+            _voice_auth_enabled = True
+            add_log("🔐  Voice profile loaded — Auth ACTIVE!", "#4466ff")
+        except Exception:
+            pass
+
+def verify_voice(audio_obj) -> bool:
+    """Return True if audio matches owner's voice (cosine sim > 0.78)."""
+    if not _voice_auth_enabled or _owner_embedding is None:
+        return True
+    emb = _extract_mfcc_embedding(audio_obj)
+    if emb is None:
+        return True
+    sim = _cosine_sim(_owner_embedding, emb)
+    match = sim > 0.78
+    icon  = "✅" if match else "❌"
+    add_log(f"🔐 {icon} Voice match: {sim:.2f}", "#4466ff" if match else "#ff4466")
+    return match
+
+def enroll_voice():
+    """Record owner's voice (8s), save MFCC fingerprint."""
+    global _owner_embedding, _voice_auth_enabled
+    speak("Sir, main aapki awaaz register karta hoon. 8 second mein ek se aath tak ginte rahen.")
+    time.sleep(0.4)
+    r2 = sr.Recognizer()
+    samples_list = []
+    try:
+        with sr.Microphone() as src:
+            r2.adjust_for_ambient_noise(src, duration=0.3)
+            speak("Ab bolna shuru karo!")
+            # Record 8 seconds in two 4-second chunks for better coverage
+            for _ in range(2):
+                try:
+                    chunk = r2.listen(src, timeout=6, phrase_time_limit=5)
+                    emb   = _extract_mfcc_embedding(chunk)
+                    if emb is not None:
+                        samples_list.append(emb)
+                except Exception:
+                    pass
+    except Exception as e:
+        speak(f"Sir, recording mein problem aayi.")
+        return
+
+    if not samples_list:
+        speak("Sir, koi audio nahi aaya. Dobara try karo.")
+        return
+
+    # Average multiple chunks for robust fingerprint
+    _owner_embedding    = np.mean(samples_list, axis=0)
+    _voice_auth_enabled = True
+    np.save(VOICE_PROFILE_PATH, _owner_embedding)
+    add_log("🔐  Voice profile saved — Auth ACTIVE!", "#00ffcc")
+    speak("Perfect sir! Aapki awaaz register ho gayi. Ab sirf aap hi JARVIS se baat kar sakte hain. Voice lock active!")
+
+def disable_voice_auth():
+    """Disable voice authentication."""
+    global _voice_auth_enabled
+    _voice_auth_enabled = False
+    if os.path.exists(VOICE_PROFILE_PATH):
+        os.remove(VOICE_PROFILE_PATH)
+    add_log("🔓  Voice auth disabled.", "#ff8844")
+    speak("Sir, voice lock hataa diya. Ab koi bhi JARVIS se baat kar sakta hai.")
+
+# ─────────────────────────────────────────────────────────────
 #  J A R V I S  —  Command Engine  (60+ commands)
 # ─────────────────────────────────────────────────────────────
 import re, requests, random as _rnd
+
 
 # ── Witty JARVIS responses ───────────────────────────────────
 JOKES = [
@@ -411,8 +578,27 @@ def process_command(command: str):
     c = command.strip().lower()
     add_log(f"🤖  JARVIS processing: {c}", "#334466")
 
+    # ━━ VOICE AUTHENTICATION COMMANDS ━━━━━━━━━━━━━━━━━━━━━━━
+    if any(w in c for w in ["voice register", "apni awaaz", "meri awaaz register",
+                             "voice enroll", "enroll voice", "voice lock lagao",
+                             "awaaz register"]):
+        threading.Thread(target=enroll_voice, daemon=True).start()
+        return None
+
+    elif any(w in c for w in ["voice lock hatao", "disable voice", "voice auth off",
+                               "voice lock off", "voice unlock"]):
+        disable_voice_auth()
+        return None
+
+    elif any(w in c for w in ["voice status", "voice lock status", "auth status"]):
+        if _voice_auth_enabled:
+            speak("Sir, voice lock active hai. Sirf aapki awaaz accept hogi.")
+        else:
+            speak("Sir, voice lock off hai. Koi bhi baat kar sakta hai.")
+        return None
+
     # ━━ GREETINGS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    if any(w in c for w in ["hello jarvis", "hey jarvis", "hi jarvis", "namaste", "hello", "hi"]):
+    elif any(w in c for w in ["hello jarvis", "hey jarvis", "hi jarvis", "namaste", "hello", "hi"]):
         _greet_by_time()
 
     elif any(w in c for w in ["how are you", "kaisa hai", "kaise ho", "you okay"]):
@@ -669,13 +855,18 @@ def _assistant_loop():
     global _running
     add_log("⚙  JARVIS systems initializing…", "#334466")
 
+    # Load voice profile (if previously enrolled)
+    _load_voice_profile()
+
     # Run mic calibration + audio pre-caching in parallel
     cache_thread = threading.Thread(target=_precache_blocking, daemon=True)
     cache_thread.start()
     _calibrate_mic()   # runs while cache builds in background
 
-    add_log("✅  JARVIS online — all systems ready!", "#00ffcc")
+    auth_msg = " Voice lock active!" if _voice_auth_enabled else ""
+    add_log(f"✅  JARVIS online — all systems ready!{auth_msg}", "#00ffcc")
     speak("JARVIS online. Kya hukum hai, sir? Code likhna hai, koi site kholni hai, ya bas baat karni hai — main hazir hoon!")
+
     while _running:
         cmd = listen()
         if not _running:
