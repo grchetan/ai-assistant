@@ -7,7 +7,9 @@ import threading
 import queue
 import asyncio
 import tempfile
+import re
 import numpy as np
+import requests
 import speech_recognition as sr
 import edge_tts
 import pygame
@@ -18,6 +20,7 @@ import subprocess
 import time
 import math
 import random
+import random as _rnd
 import tkinter as tk
 
 # ─────────────────────────────────────────────────────────────
@@ -139,9 +142,12 @@ async def _precache_all():
             pass   # if one fails, skip it
 
 def _precache_blocking():
-    """Run pre-cache in a new event loop (called from thread)."""
+    """Run pre-cache using a fresh event loop (called from thread)."""
     try:
-        asyncio.run(_precache_all())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_precache_all())
+        loop.close()
         add_log(f"\u26a1  {len(_audio_cache)} responses cached — instant replies ready!", "#00ffcc")
     except Exception:
         pass
@@ -168,14 +174,18 @@ def speak(text):
     add_log(f"🔊  {text}", "#00ffcc")
     try:
         if not _play_from_cache(text):          # cache hit → instant
-            fpath = asyncio.run(_edge_tts_generate(text))  # cache miss → network
+            # Use a new dedicated event loop to avoid conflicts
+            # with any running asyncio loop in background threads
+            loop = asyncio.new_event_loop()
+            try:
+                fpath = loop.run_until_complete(_edge_tts_generate(text))
+            finally:
+                loop.close()
             _play_and_delete(fpath)
     except Exception as e:
         add_log(f"❌  TTS error: {e}", "#ff4466")
     set_state("idle")
 
-# keep mic source open between listens to avoid re-init overhead
-_mic_source = None
 
 def _calibrate_mic():
     """One-time mic calibration. Sets energy threshold for the session."""
@@ -351,9 +361,11 @@ def enroll_voice():
     """Record owner's voice (8s), save MFCC fingerprint."""
     global _owner_embedding, _voice_auth_enabled
     speak("Sir, main aapki awaaz register karta hoon. 8 second mein ek se aath tak ginte rahen.")
-    time.sleep(0.4)
+    time.sleep(0.5)   # wait for speak() to finish before opening mic
     r2 = sr.Recognizer()
     samples_list = []
+    speak("Ab bolna shuru karo!")
+    time.sleep(0.3)
     try:
         with sr.Microphone() as src:
             r2.adjust_for_ambient_noise(src, duration=0.3)
@@ -391,11 +403,6 @@ def disable_voice_auth():
     add_log("🔓  Voice auth disabled.", "#ff8844")
     speak("Sir, voice lock hataa diya. Ab koi bhi JARVIS se baat kar sakta hai.")
 
-# ─────────────────────────────────────────────────────────────
-#  J A R V I S  —  Command Engine  (60+ commands)
-# ─────────────────────────────────────────────────────────────
-import re, requests, random as _rnd
-
 
 # ── Witty JARVIS responses ───────────────────────────────────
 JOKES = [
@@ -425,7 +432,7 @@ FRUSTRATED_RESPONSES = [
 # ── Utility functions ────────────────────────────────────────
 def _open_url(url: str, label: str = ""):
     webbrowser.open(url)
-    speak(f"{label or url} khol diya, sir. Done!")
+    speak(f"{label or url} khol diya, sir!")
 
 def _open_website(url: str):
     if not url.startswith("http"):
@@ -730,7 +737,7 @@ def process_command(command: str):
     elif "claude"     in c: _open_url("https://claude.ai",            "Claude AI")
     elif "google"     in c and not any(w in c for w in ["search","karo","dhundh"]): _open_url("https://google.com", "Google")
     elif "gmail"      in c: _open_url("https://mail.google.com",      "Gmail")
-    elif "drive"      in c: _open_url("https://drive.google.com",     "Google Drive")
+    elif "google drive" in c or "gdrive" in c: _open_url("https://drive.google.com",     "Google Drive")
     elif "instagram"  in c: _open_url("https://instagram.com",        "Instagram")
     elif "twitter"    in c or "x.com" in c: _open_url("https://x.com", "Twitter")
     elif "whatsapp"   in c: _open_url("https://web.whatsapp.com",     "WhatsApp Web")
@@ -792,12 +799,15 @@ def process_command(command: str):
 
     # ━━ SYSTEM CONTROLS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     elif "close" in c and ("browser" in c or "tab" in c): _close_browsers()
-    elif "lock"  in c: speak("Locking workstation, sir."); os.system("rundll32.exe user32.dll,LockWorkStation")
+    elif "voice unlock" in c or "voice lock hatao" in c or "voice lock off" in c:
+        disable_voice_auth()   # already handled above, safety fallback
+    elif "lock" in c and "unlock" not in c and "voice" not in c:
+        speak("Locking workstation, sir."); os.system("rundll32.exe user32.dll,LockWorkStation")
     elif "sleep" in c and "pc" in c: speak("PC sleep mode, sir."); os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
     elif "recycle" in c or "empty recycle" in c:
         os.system('powershell -command "Clear-RecycleBin -Force"')
         speak("Recycle bin cleared, sir!")
-    elif "ip" in c or "my ip" in c or "mera ip" in c:
+    elif "ip address" in c or "mera ip" in c or "my ip" in c or c == "ip":
         try:
             ip = requests.get("https://api.ipify.org", timeout=4).text
             speak(f"Sir, aapka public IP address hai {ip}.")
