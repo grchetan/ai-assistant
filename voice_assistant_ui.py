@@ -8,6 +8,7 @@ import queue
 import asyncio
 import tempfile
 import re
+import json
 import numpy as np
 import requests
 import speech_recognition as sr
@@ -857,6 +858,116 @@ def process_command(command: str):
             ]))
 
     return None
+
+# =============================================================
+#  🧠  G E M I N I   A I   B R A I N
+#  Real intelligence — understands anything, remembers context
+# =============================================================
+JARVIS_CONFIG_PATH = "jarvis_config.json"
+
+# JARVIS personality for Gemini
+_JARVIS_SYSTEM_PROMPT = """You are JARVIS — Just A Rather Very Intelligent System.
+You are Tony Stark's elite AI assistant, now serving the user.
+
+PERSONALITY:
+- Speak in Hinglish (natural mix of Hindi and English)
+- Be witty, confident, slightly sarcastic — like the real JARVIS
+- Always call the user "sir"
+- Keep ALL responses SHORT — max 2-3 sentences (voice output, no long paragraphs)
+- No bullet points, no markdown, no lists — plain natural speech only
+- For factual questions: give the answer first, then add a witty comment
+- For tasks you can't do directly: suggest how, don't refuse
+
+EXAMPLES:
+User: Python kya hai?
+JARVIS: Sir, Python ek high-level programming language hai — clean syntax, massive community. Guido van Rossum ne 1991 mein banaya. Basically, coding ka gentleman's choice!
+
+User: Mujhe motivate karo
+JARVIS: Sir, Tony Stark ne bhi pehle ek cave mein kaam kiya — aur Iron Man bana diya. Aap ghar pe kaam kar rahe hain, that's already an upgrade!
+
+User: 2 + 2 kitna hota hai?
+JARVIS: Sir, 4. Lekin agar aap stock market dekh rahe hain, toh sometimes 2 + 2 = -500 bhi hota hai!
+
+IMPORTANT: Always respond in voice-friendly plain text. Short. Punchy. JARVIS-style."""
+
+_gemini_model   = None
+_chat_session   = None   # maintains full conversation context
+_gemini_enabled = False
+
+def _load_config() -> dict:
+    if os.path.exists(JARVIS_CONFIG_PATH):
+        try:
+            return json.load(open(JARVIS_CONFIG_PATH, encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def _save_config(cfg: dict):
+    json.dump(cfg, open(JARVIS_CONFIG_PATH, "w", encoding="utf-8"), indent=2)
+
+def _init_gemini():
+    """Initialize Gemini AI brain. Reads API key from config file."""
+    global _gemini_model, _chat_session, _gemini_enabled
+    cfg = _load_config()
+    api_key = cfg.get("gemini_api_key", "").strip()
+    if not api_key:
+        add_log("\u26a0  Gemini key not set. Say 'Gemini key set karo' to configure.", "#ff8844")
+        return
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        _gemini_model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=_JARVIS_SYSTEM_PROMPT,
+        )
+        _chat_session   = _gemini_model.start_chat(history=[])
+        _gemini_enabled = True
+        add_log("\U0001f9e0  Gemini AI brain ONLINE — JARVIS is now fully intelligent!", "#aa33ff")
+    except ImportError:
+        add_log("\u26a0  google-generativeai not installed. pip install google-generativeai", "#ff8844")
+    except Exception as e:
+        add_log(f"\u26a0  Gemini init failed: {e}", "#ff8844")
+
+def _ask_gemini(query: str) -> str | None:
+    """Send query to Gemini with conversation context. Returns response text or None."""
+    global _chat_session
+    if not _gemini_enabled or _chat_session is None:
+        return None
+    try:
+        set_state("thinking")
+        add_log(f"\U0001f9e0  Gemini thinking: {query[:60]}...", "#aa33ff")
+        response = _chat_session.send_message(query)
+        return response.text.strip()
+    except Exception as e:
+        add_log(f"\u26a0  Gemini error: {e}", "#ff8844")
+        # Restart chat session on error to recover
+        try:
+            _chat_session = _gemini_model.start_chat(history=[])
+        except Exception:
+            pass
+        return None
+
+def _set_gemini_key(key: str):
+    """Save Gemini API key and reinitialize."""
+    cfg = _load_config()
+    cfg["gemini_api_key"] = key.strip()
+    _save_config(cfg)
+    _init_gemini()
+    if _gemini_enabled:
+        speak("Sir, Gemini brain activate ho gaya! Ab main properly intelligent hoon!")
+    else:
+        speak("Sir, key save ho gayi par connection nahi bana. Key check karo.")
+
+def _reset_conversation():
+    """Clear Gemini conversation history (fresh start)."""
+    global _chat_session
+    if _gemini_model:
+        _chat_session = _gemini_model.start_chat(history=[])
+        add_log("\U0001f504  Conversation reset.", "#555577")
+        speak("Sir, conversation history clear kar diya. Fresh start!")
+    else:
+        speak("Sir, Gemini brain active nahi hai.")
+
 
 # ─────────────────────────────────────────────────────────────
 #  ASSISTANT LOOP  (background thread)
