@@ -1015,14 +1015,17 @@ def _assistant_loop():
     # Load voice profile (if previously enrolled)
     _load_voice_profile()
 
-    # Run mic calibration + audio pre-caching in parallel
-    cache_thread = threading.Thread(target=_precache_blocking, daemon=True)
+    # Start all background init tasks in parallel for fastest startup
+    cache_thread  = threading.Thread(target=_precache_blocking, daemon=True)
+    gemini_thread = threading.Thread(target=_init_gemini,       daemon=True)
     cache_thread.start()
-    _calibrate_mic()   # runs while cache builds in background
+    gemini_thread.start()
+    _calibrate_mic()   # runs while others init in background
 
-    auth_msg = " Voice lock active!" if _voice_auth_enabled else ""
+    auth_msg = " 🔐 Voice lock active!" if _voice_auth_enabled else ""
     add_log(f"✅  JARVIS online — all systems ready!{auth_msg}", "#00ffcc")
     speak("JARVIS online. Kya hukum hai, sir? Code likhna hai, koi site kholni hai, ya bas baat karni hai — main hazir hoon!")
+
 
     while _running:
         cmd = listen()
