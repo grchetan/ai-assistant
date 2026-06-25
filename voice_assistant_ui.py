@@ -668,17 +668,24 @@ def process_command(command: str):
         else:
             speak("Sir, ye math expression samajh nahi aaya. Dobara try karo.")
 
-    # ━━ KNOWLEDGE / WIKIPEDIA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    elif any(c.startswith(p) for p in ["what is ","who is ","tell me about ","batao ","explain ","what are ","kya hai "]):
-        for prefix in ["what is ","who is ","tell me about ","batao ","explain ","what are ","kya hai "]:
+    # ━━ KNOWLEDGE — Gemini first, Wikipedia as backup ━━━━━━━━
+    elif any(c.startswith(p) for p in ["what is ","who is ","tell me about ",
+                                        "batao ","explain ","what are ","kya hai ",
+                                        "kya hota hai ","define "]):
+        for prefix in ["what is ","who is ","tell me about ","batao ","explain ",
+                       "what are ","kya hai ","kya hota hai ","define "]:
             if c.startswith(prefix):
                 topic = c[len(prefix):].strip()
                 break
         else:
             topic = c
         if topic:
-            speak(f"Sir, {topic} ke baare mein ek second...")
-            _wiki_search(topic)
+            answer = _ask_gemini(c)   # Try Gemini (smarter + context-aware)
+            if answer:
+                speak(answer)
+            else:                     # Gemini unavailable → Wikipedia fallback
+                speak(f"Sir, {topic} ke baare mein ek second...")
+                _wiki_search(topic)
 
     # ━━ APPS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     elif "notepad"     in c: speak("Notepad, sir!");          os.system("notepad")
@@ -843,19 +850,48 @@ def process_command(command: str):
         speak("JARVIS going offline, sir. It's been an honour. Call me anytime!")
         return "EXIT"
 
-    # ━━ UNKNOWN — smart fallback ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    else:
-        question_starters = ["kya","kaun","kab","kahan","kyun","kaise","who","what",
-                             "when","where","why","how","is","are","was","were","tell"]
-        if any(c.startswith(w) for w in question_starters):
-            speak(f"Sir, ek second — {c} ke baare mein dhundh raha hoon.")
-            _wiki_search(c)
+    # ━━ GEMINI API KEY SETUP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    elif any(w in c for w in ["gemini key", "api key set", "api key lagao",
+                               "brain activate", "gemini activate"]):
+        speak("Sir, please API key boliye. Ek second...")
+        key = listen()
+        if key and len(key) > 10:
+            threading.Thread(target=_set_gemini_key, args=(key,), daemon=True).start()
         else:
-            speak(_rnd.choice([
-                "Sir, thoda aur clearly bolo? Samajh nahi aaya.",
-                "Bhai, ye command meri dictionary mein nahi hai. Dobara try karo!",
-                "Sir, clarify karo — kya karna hai exactly?",
-            ]))
+            speak("Sir, valid key nahi suna. Dobara try karo.")
+        return None
+
+    elif any(w in c for w in ["conversation reset", "history clear", "bhool jao sab",
+                               "fresh start", "memory clear"]):
+        _reset_conversation()
+        return None
+
+    elif any(w in c for w in ["gemini status", "brain status", "ai status"]):
+        if _gemini_enabled:
+            speak("Sir, Gemini brain fully online hai! Main kuch bhi samajh sakta hoon.")
+        else:
+            speak("Sir, Gemini brain offline hai. 'Gemini key set karo' boliye aur API key dein.")
+        return None
+
+    # ━━ UNKNOWN — Gemini AI brain handles EVERYTHING else ━━━
+    else:
+        answer = _ask_gemini(c)    # JARVIS's real AI brain
+        if answer:
+            speak(answer)
+        else:
+            # Gemini offline — try Wikipedia for question-like inputs
+            question_starters = ["kya","kaun","kab","kahan","kyun","kaise","who",
+                                  "what","when","where","why","how","is","are",
+                                  "was","were","tell","bata"]
+            if any(c.startswith(w) for w in question_starters):
+                speak("Sir, ek second...")
+                _wiki_search(c)
+            else:
+                speak(_rnd.choice([
+                    "Sir, samajh nahi aaya — thoda clearly bolo?",
+                    "Bhai, ye meri dictionary mein nahi. Dobara try karo!",
+                    "Sir, clarify karo. Gemini bhi confuse ho gaya!",
+                ]))
 
     return None
 
