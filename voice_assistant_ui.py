@@ -1077,7 +1077,7 @@ class ARIAApp:
     def _drag_start(self, e):
         self._drag_x, self._drag_y = e.x_root, e.y_root
 
-        # fldsjfd
+        
 
     def _drag_move(self, e):
         dx = e.x_root - self._drag_x
