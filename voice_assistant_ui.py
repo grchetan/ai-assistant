@@ -81,8 +81,32 @@ _state            = "idle"
 _running          = False
 _log_lines        = []          # list of (text, color)
 _ui_queue         = queue.Queue()
-_fail_count       = 0           # consecutive recognition failures
-_recognizer       = sr.Recognizer()   # shared, pre-calibrated
+# Separate counters: silence vs unclear speech
+_fail_count        = 0   # consecutive UnknownValueError (UNCLEAR speech)
+_silence_count     = 0   # consecutive WaitTimeoutError (TRUE SILENCE)
+_last_spoke_time   = 0.0 # when JARVIS last said something proactively
+
+# Varied messages so JARVIS never sounds repetitive
+_UNCLEAR_MSGS = [
+    "Thoda clearly bolo please.",
+    "Sir, samajh nahi aaya — ek baar aur boliye?",
+    "Bhai, mic thoda door lag raha hai. Paas aao!",
+]
+
+# Proactive small-talk when user is silent too long (every ~45s)
+_IDLE_MSGS = [
+    "Sir, main yahan hoon — koi kaam ho toh bolo!",
+    "Koi kaam hai kya, sir? Bore ho raha hoon main bhi!",
+    "Sir, ek joke sunoge? Nahi toh koi kaam batao!",
+    "Sab theek hai, sir? Kaafi time se khamosh hain aap.",
+    "Sir, chai pi lena — main wait karunga!",
+    "Agar neend aa rahi hai toh so jao sir, main guard karunga!",
+    "Sir, kya soch rahe ho itna? Share karo — main bhi AI hoon, suggestion de sakta hoon!",
+    "Abhi bhi yahan hoon sir. Kabhi bhi bulao — ready hoon!",
+    "Sir, coding chal rahi hai? Koi error aaye toh batao, main help karunga!",
+    "Main standby mein hoon sir — jab chahein baat karo!",
+]
+
 
 def _post(cmd, *args):
     _ui_queue.put((cmd, args))
@@ -201,14 +225,15 @@ def _calibrate_mic():
         pass
 
 def listen():
-    """Fast listen — NO per-call noise adjustment (calibrated once at startup)."""
-    global _fail_count
+    """Listen once. Silence = silent retry. Unclear speech counted separately."""
+    global _fail_count, _silence_count
     set_state("listening")
     try:
         with sr.Microphone() as source:
-            # ⚡ NO adjust_for_ambient_noise here — saves 300ms every call!
             audio = _recognizer.listen(source, timeout=7, phrase_time_limit=9)
     except sr.WaitTimeoutError:
+        # TRUE SILENCE — user said nothing. Never complain about this.
+        _silence_count += 1
         set_state("idle")
         return ""
     except Exception:
@@ -218,7 +243,8 @@ def listen():
     set_state("thinking")
     try:
         command = _recognizer.recognize_google(audio, language="en-in")
-        _fail_count = 0
+        _fail_count    = 0
+        _silence_count = 0
         # 🔐 Voice Authentication check
         if not verify_voice(audio):
             add_log("🔐 ❌ Unauthorized voice — JARVIS ignoring.", "#ff4466")
@@ -228,13 +254,14 @@ def listen():
         add_log(f"🎙  You said: {command}", "#00e5ff")
         return command.lower()
     except sr.UnknownValueError:
+        # Mic picked up NOISE but couldn't understand — only complain after 5 in a row
         _fail_count += 1
-        if _fail_count >= 3:
+        if _fail_count >= 5:
             add_log("〰  Thoda clearly bolo", "#ff8844")
-            speak("Thoda clearly bolo please.")
+            speak(_rnd.choice(_UNCLEAR_MSGS))
             _fail_count = 0
         else:
-            add_log("〰  (unclear, retrying)", "#555577")
+            add_log("〰  (background noise, ignoring)", "#333355")
         set_state("idle")
         return ""
     except sr.RequestError:
@@ -361,17 +388,15 @@ def verify_voice(audio_obj) -> bool:
 def enroll_voice():
     """Record owner's voice (8s), save MFCC fingerprint."""
     global _owner_embedding, _voice_auth_enabled
-    speak("Sir, main aapki awaaz register karta hoon. 8 second mein ek se aath tak ginte rahen.")
-    time.sleep(0.5)   # wait for speak() to finish before opening mic
+    speak("Sir, main aapki awaaz register karta hoon. 8 second mein kuch bhi bolte rahen — ek se aath tak ginte rahen.")
+    time.sleep(0.5)
     r2 = sr.Recognizer()
     samples_list = []
-    speak("Ab bolna shuru karo!")
-    time.sleep(0.3)
     try:
         with sr.Microphone() as src:
             r2.adjust_for_ambient_noise(src, duration=0.3)
             speak("Ab bolna shuru karo!")
-            # Record 8 seconds in two 4-second chunks for better coverage
+            time.sleep(0.2)
             for _ in range(2):
                 try:
                     chunk = r2.listen(src, timeout=6, phrase_time_limit=5)
@@ -380,8 +405,8 @@ def enroll_voice():
                         samples_list.append(emb)
                 except Exception:
                     pass
-    except Exception as e:
-        speak(f"Sir, recording mein problem aayi.")
+    except Exception:
+        speak("Sir, recording mein problem aayi.")
         return
 
     if not samples_list:
@@ -919,7 +944,7 @@ User: Python kya hai?
 JARVIS: Sir, Python ek high-level programming language hai — clean syntax, massive community. Guido van Rossum ne 1991 mein banaya. Basically, coding ka gentleman's choice!
 
 User: Mujhe motivate karo
-JARVIS: Sir, Tony Stark ne bhi pehle ek cave mein kaam kiya — aur Iron Man bana diya. Aap ghar pe kaam kar rahe hain, that's already an upgrade!
+JARVIS: Sir, Tony Stark ne bhi prehle ek cave mein kaam kiya — aur Iron Man bana diya. Aap ghar pe kaam kar rahe hain, that's already an upgrade!
 
 User: 2 + 2 kitna hota hai?
 JARVIS: Sir, 4. Lekin agar aap stock market dekh rahe hain, toh sometimes 2 + 2 = -500 bhi hota hai!
@@ -1008,8 +1033,10 @@ def _reset_conversation():
 # ─────────────────────────────────────────────────────────────
 #  ASSISTANT LOOP  (background thread)
 # ─────────────────────────────────────────────────────────────
+IDLE_CHAT_INTERVAL = 45   # seconds before JARVIS initiates small talk
+
 def _assistant_loop():
-    global _running
+    global _running, _last_spoke_time, _silence_count
     add_log("⚙  JARVIS systems initializing…", "#334466")
 
     # Load voice profile (if previously enrolled)
@@ -1025,18 +1052,31 @@ def _assistant_loop():
     auth_msg = " 🔐 Voice lock active!" if _voice_auth_enabled else ""
     add_log(f"✅  JARVIS online — all systems ready!{auth_msg}", "#00ffcc")
     speak("JARVIS online. Kya hukum hai, sir? Code likhna hai, koi site kholni hai, ya bas baat karni hai — main hazir hoon!")
-
+    _last_spoke_time = time.time()
 
     while _running:
         cmd = listen()
         if not _running:
             break
+
         if cmd:
+            # User said something — reset silence counters
+            _silence_count   = 0
+            _last_spoke_time = time.time()
             result = process_command(cmd)
             if result == "EXIT":
                 _running = False
                 _post("stopped")
                 break
+        else:
+            # Pure silence — check if JARVIS should initiate conversation
+            idle_secs = time.time() - _last_spoke_time
+            if idle_secs > IDLE_CHAT_INTERVAL:
+                msg = _rnd.choice(_IDLE_MSGS)
+                add_log(f"💬  JARVIS: {msg}", "#444466")
+                speak(msg)
+                _last_spoke_time = time.time()   # reset after speaking
+                _silence_count   = 0
 
 
 # ─────────────────────────────────────────────────────────────
