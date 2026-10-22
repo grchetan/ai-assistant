@@ -31,28 +31,35 @@ class SystemCleanerPlugin(JarvisPlugin):
 
     def can_handle(self, text: str) -> bool:
         t = text.lower()
-        return any(k in t for k in ["clean system", "flush dns", "empty recycle bin", "kachra saaf", "junk clean"])
+        return any(k in t for k in ["clean system", "flush dns", "empty recycle bin", "kachra saaf", "junk clean", "clean cache"])
 
     def execute(self, text: str, payload: Dict[str, Any]) -> Tuple[bool, str]:
         logger = get_logger()
-        logger.info("Starting deep system cleanup...", "CLEANER")
+        t = text.lower()
+        logger.info(f"Cleaner requested with prompt: {text}", "CLEANER")
 
+        # 1. Explicit Recycle Bin Emptying (Only when explicitly asked)
+        if "recycle bin" in t or "dustbin" in t:
+            try:
+                # Flag 0 = Windows displays confirmation dialog so user has complete control and safety!
+                ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, 0)
+                msg = "Recycle bin clean request process kar di gayi hai sir."
+                logger.success(msg, "CLEANER")
+                return True, msg
+            except Exception as e:
+                logger.debug(f"Recycle bin empty skipped or cancelled: {e}", "CLEANER")
+                return True, "Recycle bin action complete ya cancel kar di gayi hai sir."
+
+        # 2. General System / Cache / Temp Cleanup
         cleaned_mb = 0.0
 
-        # 1. Empty Recycle Bin
-        try:
-            # Flags: SHERB_NOCONFIRMATION = 0x00000001, SHERB_NOPROGRESSUI = 0x00000002, SHERB_NOSOUND = 0x00000004
-            ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, 7)
-        except Exception:
-            pass
-
-        # 2. Flush DNS
+        # Flush DNS
         try:
             subprocess.run(["ipconfig", "/flushdns"], capture_output=True, check=False)
         except Exception:
             pass
 
-        # 3. Clean user %TEMP% folder
+        # Clean user %TEMP% folder (Safe system temporary cache files only)
         temp_dir = Path(os.environ.get("TEMP", ""))
         if temp_dir.exists():
             for item in temp_dir.iterdir():
@@ -66,6 +73,6 @@ class SystemCleanerPlugin(JarvisPlugin):
                 except Exception:
                     continue
 
-        speech = f"Sir, system cleanup complete! Recycle Bin empty kar diya hai, DNS flush ho gaya hai, aur {cleaned_mb:.1f} MB temporary cache saaf ho gayi hai."
+        speech = f"Sir, system cache cleanup complete! DNS flush ho gaya hai aur {cleaned_mb:.1f} MB temporary app cache saaf ho gayi hai. Aapki koi bhi personal file ya Recycle Bin touch nahi hui hai."
         logger.success(speech, "CLEANER")
         return True, speech

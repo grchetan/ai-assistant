@@ -73,6 +73,7 @@ class IntentType(Enum):
     DEV_NETWORK_PING      = "dev.network_ping"
     DEV_NETWORK_SPEED     = "dev.network_speed"
     DEV_ORGANIZE_DESKTOP  = "dev.organize_desktop"
+    DEV_UNDO_DESKTOP      = "dev.undo_desktop"
     DEV_ORGANIZE_DOWNLOADS= "dev.organize_downloads"
 
     # Plugins: Weather, Stocks, Trivia
@@ -253,9 +254,11 @@ class IntentParser:
              IntentType.DEV_NETWORK_PING, {}),
             (re.compile(r"\b(speed test|check internet speed|net speed)\b", re.I),
              IntentType.DEV_NETWORK_SPEED, {}),
-            (re.compile(r"\b(organize desktop|desktop saaf karo|clean desktop)\b", re.I),
+            (re.compile(r"\b(organize desktop|desktop organize karo)\b", re.I),
              IntentType.DEV_ORGANIZE_DESKTOP, {}),
-            (re.compile(r"\b(organize downloads|downloads folder saaf karo)\b", re.I),
+            (re.compile(r"\b(undo desktop|desktop restore|undo organize|desktop wapas karo)\b", re.I),
+             IntentType.DEV_UNDO_DESKTOP, {}),
+            (re.compile(r"\b(organize downloads|downloads folder organize karo)\b", re.I),
              IntentType.DEV_ORGANIZE_DOWNLOADS, {}),
 
             # ──────────────── Weather, News, Crypto ────────────────

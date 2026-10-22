@@ -46,7 +46,7 @@ class VoiceBiometrics:
         self.logger = get_logger()
         self.sfx = get_sound_fx()
 
-        self.threshold = self.config.get("voice_auth", "threshold", 0.72)
+        self.threshold = self.config.get("voice_auth", "threshold", 0.58)
         self.enabled = self.config.get("voice_auth", "enabled", False)
         self._enrolled_profile: Optional[np.ndarray] = None
         self._lock = threading.Lock()

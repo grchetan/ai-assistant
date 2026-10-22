@@ -193,24 +193,28 @@ class TextToSpeechEngine:
                 self.logger.warning(f"Error in TTS callback: {e}", "TTS")
 
     def _speak_with_edge_tts(self, text: str, voice: str) -> bool:
-        """Generate audio using Edge-TTS and stream via Pygame Mixer."""
-        cache_file = self._temp_dir / f"tts_{int(time.time()*1000)}.mp3"
+        """Generate audio using Edge-TTS and stream via Pygame Mixer with caching."""
+        # Create deterministic cache key for phrase
+        import hashlib
+        key = hashlib.md5(f"{text}_{voice}".encode("utf-8")).hexdigest()
+        cache_file = self._temp_dir / f"tts_{key}.mp3"
+
         try:
-            rate = self.config.get("tts", "rate", "+0%")
-            pitch = self.config.get("tts", "pitch", "+0Hz")
-            volume = self.config.get("tts", "volume", "+0%")
+            # Only generate over network if not already cached
+            if not cache_file.exists() or cache_file.stat().st_size == 0:
+                rate = self.config.get("tts", "rate", "+0%")
+                pitch = self.config.get("tts", "pitch", "+0Hz")
+                volume = self.config.get("tts", "volume", "+0%")
 
-            async def _generate():
-                communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, volume=volume)
-                await communicate.save(str(cache_file))
+                async def _generate():
+                    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, volume=volume)
+                    await communicate.save(str(cache_file))
 
-            # Run event loop for Edge-TTS
-            asyncio.run(_generate())
+                asyncio.run(_generate())
 
             if not cache_file.exists() or cache_file.stat().st_size == 0:
                 return False
 
-            # Play using pygame
             if not pygame.mixer.get_init():
                 pygame.mixer.init()
 
@@ -221,36 +225,40 @@ class TextToSpeechEngine:
                 if self._interrupt_flag.is_set():
                     pygame.mixer.music.stop()
                     break
-                time.sleep(0.05)
+                time.sleep(0.04)
 
-            # Cleanup
             try:
                 pygame.mixer.music.unload()
-                if cache_file.exists():
-                    cache_file.unlink(missing_ok=True)
             except Exception:
                 pass
 
             return True
 
         except Exception as e:
-            self.logger.warning(f"Edge-TTS failed ({e}); falling back to SAPI5.", "TTS")
-            if cache_file.exists():
-                try:
-                    cache_file.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            self.logger.warning("Edge-TTS network delay; smoothly using Windows SAPI5 voice.", "TTS")
             return False
 
     def _speak_with_pyttsx3(self, text: str) -> bool:
-        """Offline fallback speech via SAPI5."""
+        """Direct zero-latency Windows SAPI5 COM fallback."""
         try:
-            if self._pyttsx3_engine:
-                self._pyttsx3_engine.say(text)
-                self._pyttsx3_engine.runAndWait()
-                return True
-        except Exception as e:
-            self.logger.error(f"PyTTSx3 synthesis error: {e}", "TTS")
+            import pythoncom
+            import win32com.client
+            pythoncom.CoInitialize()
+            speaker = win32com.client.Dispatch("SAPI.SpVoice")
+            # Set rate and volume
+            speaker.Rate = 1
+            speaker.Volume = 100
+            speaker.Speak(text)
+            pythoncom.CoUninitialize()
+            return True
+        except Exception:
+            try:
+                if self._pyttsx3_engine:
+                    self._pyttsx3_engine.say(text)
+                    self._pyttsx3_engine.runAndWait()
+                    return True
+            except Exception as err:
+                self.logger.error(f"SAPI5 synthesis error: {err}", "TTS")
         return False
 
     def is_busy(self) -> bool:

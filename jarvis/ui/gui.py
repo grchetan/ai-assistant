@@ -260,7 +260,8 @@ class JarvisHUD(tk.Tk):
 
         quick_actions = [
             ("📸 Screenshot", "screenshot"),
-            ("🧹 Clean Desktop", "organize desktop"),
+            ("🗂️ Organize Desktop", "CONFIRM_ORGANIZE_DESKTOP"),
+            ("↩️ Undo Organize", "undo desktop"),
             ("⛅ Weather", "weather report"),
             ("🎵 Play/Pause Music", "play music"),
             ("⚡ Speed Test", "speed test"),
@@ -350,6 +351,19 @@ class JarvisHUD(tk.Tk):
         if cmd == "CLEAR_LOGS":
             self.term_text.delete("1.0", tk.END)
             return
+        if cmd == "CONFIRM_ORGANIZE_DESKTOP":
+            ok = messagebox.askyesno(
+                "Confirm Desktop Organization",
+                "Kya aap Desktop files ko category folders (Images, Documents, Code) me organize karna chahte hain?\n\n"
+                "• Aapke desktop app shortcuts aur links touch nahi honge.\n"
+                "• Koi file delete nahi hogi.\n"
+                "• Aap kisi bhi waqt 'Undo Organize' se wapas la sakte hain.",
+                parent=self
+            )
+            if not ok:
+                return
+            cmd = "organize desktop"
+
         if self.command_handler:
             threading.Thread(target=self.command_handler, args=(cmd,), daemon=True).start()
 

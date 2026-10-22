@@ -138,9 +138,19 @@ class JarvisOrchestrator:
 
     def _assistant_loop(self) -> None:
         """Continuous background listening and decision loop."""
-        time.sleep(1.5) # allow greeting to start
+        time.sleep(1.0) # allow initial greeting
         while self._running:
             try:
+                # Do NOT listen while the assistant is speaking through the speakers!
+                while self.tts.is_busy() and self._running:
+                    time.sleep(0.12)
+
+                # Acoustic decay buffer so speaker audio echo doesn't trigger the mic
+                time.sleep(0.35)
+
+                if not self._running:
+                    break
+
                 # Listen for user speech
                 text, audio_data = self.stt.listen_and_transcribe(timeout=3.5, phrase_limit=12.0)
 
@@ -177,6 +187,8 @@ class JarvisOrchestrator:
         if not cmd:
             return ""
 
+        # Stop old speech before processing new command
+        self.tts.stop()
         self.state.set_mode(AssistantMode.PROCESSING)
         self.logger.info(f'Processing command: "{cmd}"', "ORCH")
 
@@ -362,6 +374,11 @@ class JarvisOrchestrator:
         elif intent == IntentType.DEV_ORGANIZE_DESKTOP:
             from jarvis.dev.file_organizer import get_file_organizer
             response_text = get_file_organizer().organize_desktop()
+            self.speak(response_text)
+
+        elif intent == IntentType.DEV_UNDO_DESKTOP:
+            from jarvis.dev.file_organizer import get_file_organizer
+            response_text = get_file_organizer().undo_desktop()
             self.speak(response_text)
 
         elif intent == IntentType.DEV_ORGANIZE_DOWNLOADS:
