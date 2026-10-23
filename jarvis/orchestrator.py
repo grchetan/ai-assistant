@@ -162,12 +162,9 @@ class JarvisOrchestrator:
                     self.execute_command(text, audio_data)
                     continue
 
-                # 2. No speech detected (pure silence or unclear noise)
-                # Check if varied unclear response is needed
-                unclear_complaint = self.stt.get_unclear_response()
-                if unclear_complaint:
-                    self.speak(unclear_complaint)
-                    continue
+                # 2. Pure silence or ambient room sound:
+                # Do NOT nag the user. Stay quietly in listening standby.
+                time.sleep(0.1)
 
                 # 3. Check proactive idle conversation timer (45 seconds)
                 if self.config.get("llm", "proactive_idle_chat", True):
@@ -368,7 +365,12 @@ class JarvisOrchestrator:
 
         elif intent == IntentType.DEV_NETWORK_SPEED:
             from jarvis.dev.network_tools import get_network_diagnostics
-            response_text = get_network_diagnostics().get_summary_speech()
+            _, _, response_text = get_network_diagnostics().measure_internet_speed()
+            self.speak(response_text)
+
+        elif intent == IntentType.DEV_NETWORK_IP:
+            from jarvis.dev.network_tools import get_network_diagnostics
+            response_text = get_network_diagnostics().get_ip_summary_speech()
             self.speak(response_text)
 
         elif intent == IntentType.DEV_ORGANIZE_DESKTOP:

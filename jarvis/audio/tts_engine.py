@@ -157,6 +157,22 @@ class TextToSpeechEngine:
         self.bus.publish(EventType.TTS_INTERRUPT)
         self.logger.info("Speech playback interrupted.", "TTS")
 
+    def _select_voice_and_tuning(self, text: str, custom_voice: Optional[str] = None) -> Tuple[str, str, str]:
+        """Dynamically pick deep JARVIS voice and brisk, responsive speed."""
+        if custom_voice:
+            return custom_voice, self.config.get("tts", "rate", "+15%"), self.config.get("tts", "pitch", "-10Hz")
+
+        t_low = text.lower()
+        hindi_keywords = ["karo", "kijiye", "batao", "hai", "hain", "nahin", "nahi", "shukriya", "dost", "bhai", "theek", "kaise", "kya", "accha", "achha"]
+        has_hindi = any(w in t_low for w in hindi_keywords) or any('\u0900' <= ch <= '\u097f' for ch in text)
+
+        if has_hindi:
+            # Deep, fast Indian male voice
+            return "hi-IN-MadhurNeural", "+18%", "-14Hz"
+        else:
+            # Iconic deep cinematic JARVIS voice
+            return "en-US-ChristopherNeural", "+15%", "-8Hz"
+
     def _render_and_play(
         self,
         text: str,
@@ -169,13 +185,13 @@ class TextToSpeechEngine:
         self.bus.publish(EventType.TTS_START, {"text": text})
 
         preferred_engine = self.config.get("tts", "engine", "edge_tts")
-        voice = custom_voice or self.config.get("tts", "edge_voice", "hi-IN-MadhurNeural")
+        voice, rate, pitch = self._select_voice_and_tuning(text, custom_voice)
 
         played_successfully = False
 
         # Attempt 1: Edge-TTS
         if preferred_engine == "edge_tts" and _EDGE_TTS_AVAILABLE and _PYGAME_AVAILABLE:
-            played_successfully = self._speak_with_edge_tts(text, voice)
+            played_successfully = self._speak_with_edge_tts(text, voice, rate, pitch)
 
         # Attempt 2: PyTTSx3 Fallback
         if not played_successfully and self._pyttsx3_engine:
@@ -192,18 +208,15 @@ class TextToSpeechEngine:
             except Exception as e:
                 self.logger.warning(f"Error in TTS callback: {e}", "TTS")
 
-    def _speak_with_edge_tts(self, text: str, voice: str) -> bool:
-        """Generate audio using Edge-TTS and stream via Pygame Mixer with caching."""
-        # Create deterministic cache key for phrase
+    def _speak_with_edge_tts(self, text: str, voice: str, rate: str = "+15%", pitch: str = "-10Hz") -> bool:
+        """Generate audio using Edge-TTS with deep pitch and fast rate, and stream via Pygame Mixer."""
         import hashlib
-        key = hashlib.md5(f"{text}_{voice}".encode("utf-8")).hexdigest()
+        key = hashlib.md5(f"{text}_{voice}_{rate}_{pitch}".encode("utf-8")).hexdigest()
         cache_file = self._temp_dir / f"tts_{key}.mp3"
 
         try:
             # Only generate over network if not already cached
             if not cache_file.exists() or cache_file.stat().st_size == 0:
-                rate = self.config.get("tts", "rate", "+0%")
-                pitch = self.config.get("tts", "pitch", "+0Hz")
                 volume = self.config.get("tts", "volume", "+0%")
 
                 async def _generate():
@@ -225,7 +238,7 @@ class TextToSpeechEngine:
                 if self._interrupt_flag.is_set():
                     pygame.mixer.music.stop()
                     break
-                time.sleep(0.04)
+                time.sleep(0.03)
 
             try:
                 pygame.mixer.music.unload()

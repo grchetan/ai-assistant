@@ -161,18 +161,9 @@ class LLMManager:
                 pass
 
     def _offline_fallback(self, query: str) -> str:
-        """Rule-based smart fallback when Gemini is offline or unreachable."""
-        q = query.lower()
-        if "who are you" in q or "kaun ho" in q:
-            return "Sir, main JARVIS hoon. Aapka personal artificial intelligence assistant."
-        elif "how are you" in q or "kaise ho" in q:
-            return "Main bilkul badiya hoon sir, all systems running at maximum efficiency! Aap bataiye?"
-        elif "thank" in q or "shukriya" in q or "dhanyawad" in q:
-            return "Always at your service, sir! Aur koi hukum?"
-        elif "help" in q or "madad" in q:
-            return "Sir, main aapke PC control kar sakta hoon, apps open kar sakta hoon, coding me help kar sakta hoon, aur web search bhi."
-        else:
-            return "Sir, main samajh gaya. Lekin offline hone ki wajah se deep search nahi kar pa raha. Internet check karenge?"
+        """In-House Autonomous Offline AI reasoning when cloud API is offline or unconfigured."""
+        from jarvis.brain.offline_ai.master_offline_brain import get_offline_brain
+        return get_offline_brain().process_query(query)
 
 
 def get_llm_manager() -> LLMManager:

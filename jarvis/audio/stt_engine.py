@@ -156,15 +156,7 @@ class SpeechToTextEngine:
             return None, audio_data
 
     def get_unclear_response(self) -> Optional[str]:
-        """
-        Only return a varied complaint if unclear threshold (>= 4) is crossed.
-        Prevents annoying repetitive complaints.
-        """
-        snapshot = self.state.get_telemetry_snapshot()
-        unclear_cnt = snapshot.get("unclear_count", 0)
-        if unclear_cnt >= 4:
-            self.state.reset_speech_counters()
-            return random.choice(UNCLEAR_VARIED_RESPONSES)
+        """Never interrupt the user with unprompted complaints during silence or ambient noise."""
         return None
 
     def _normalize_text(self, raw_text: str) -> str:

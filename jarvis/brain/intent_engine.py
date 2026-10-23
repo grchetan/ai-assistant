@@ -72,6 +72,7 @@ class IntentType(Enum):
     DEV_GIT_STATUS        = "dev.git_status"
     DEV_NETWORK_PING      = "dev.network_ping"
     DEV_NETWORK_SPEED     = "dev.network_speed"
+    DEV_NETWORK_IP        = "dev.network_ip"
     DEV_ORGANIZE_DESKTOP  = "dev.organize_desktop"
     DEV_UNDO_DESKTOP      = "dev.undo_desktop"
     DEV_ORGANIZE_DOWNLOADS= "dev.organize_downloads"
@@ -252,8 +253,10 @@ class IntentParser:
              IntentType.DEV_GIT_STATUS, {}),
             (re.compile(r"\b(ping test|check internet ping|latency check)\b", re.I),
              IntentType.DEV_NETWORK_PING, {}),
-            (re.compile(r"\b(speed test|check internet speed|net speed)\b", re.I),
+            (re.compile(r"\b(speed test|speedtest|check internet speed|net speed|internet ki speed|internet speed)\b", re.I),
              IntentType.DEV_NETWORK_SPEED, {}),
+            (re.compile(r"\b(my ip|check ip|what is my ip|ip address|show ip|wifi name|wifi info)\b", re.I),
+             IntentType.DEV_NETWORK_IP, {}),
             (re.compile(r"\b(organize desktop|desktop organize karo)\b", re.I),
              IntentType.DEV_ORGANIZE_DESKTOP, {}),
             (re.compile(r"\b(undo desktop|desktop restore|undo organize|desktop wapas karo)\b", re.I),
